@@ -31,7 +31,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -52,6 +51,16 @@ import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
+
+
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.size
 
 // ---------------------------------------------------------------------------
 // TUNING KNOBS - change these to adjust how the game feels
@@ -106,12 +115,12 @@ fun SnakeGame() {
     val store = remember { SettingsStore(ctx) }
     val sfx = remember { Sfx(ctx) }
     val game = remember { Game() }
-    var frame by remember { mutableStateOf(0L) }
+    var frame by remember { mutableLongStateOf(0L) }
     var screen by remember { mutableStateOf(Screen.HOME) }
     var showSettings by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
-    var speed by remember { mutableStateOf(store.speed) }
-    var volume by remember { mutableStateOf(store.volume) }
+    var speed by remember { androidx.compose.runtime.mutableFloatStateOf(store.speed) }
+    var volume by remember { androidx.compose.runtime.mutableFloatStateOf(store.volume) }
 
     // push the current settings into the game (cheap, runs only when state changes)
     game.speedMul = speed
@@ -209,17 +218,36 @@ fun SnakeGame() {
                         }
                 )
 
-                // SETTINGS BUTTON (top centre, sits above the touch zones)
-                Button(
+//                // SETTINGS BUTTON (top centre, sits above the touch zones)
+//                Button(
+//                    onClick = {
+//                        game.joyActive = false
+//                        game.boosting = false
+//                        showSettings = true
+//                    },
+//                    modifier = Modifier
+//                        .align(Alignment.TopEnd)
+//                        .padding(top = 8.dp)
+//                ) { Text("Settings") }
+
+                // SETTINGS BUTTON
+                IconButton(
                     onClick = {
                         game.joyActive = false
                         game.boosting = false
                         showSettings = true
                     },
                     modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 8.dp)
-                ) { Text("Settings") }
+                        .align(Alignment.TopEnd)
+                        .padding(top = 8.dp, end = 8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Settings",
+                        tint = Color.White, // Use a high-contrast color so it stands out over your arena
+                        modifier = Modifier.size(32.dp) // Optional: adjust icon size for easier thumb tapping
+                    )
+                }
             }
         }
 
@@ -802,10 +830,9 @@ class Game {
         val fx = cos(s.angle)
         val fy = sin(s.angle)
         val px = -fy
-        val py = fx
         for (side in -1..1 step 2) {
             val ex = h.x + fx * wr * 0.35f + px * wr * 0.5f * side
-            val ey = h.y + fy * wr * 0.35f + py * wr * 0.5f * side
+            val ey = h.y + fy * wr * 0.35f + fx * wr * 0.5f * side
             drawCircle(Color.White, wr * 0.38f * zoom, Offset(sx(ex), sy(ey)))
             drawCircle(Color.Black, wr * 0.2f * zoom, Offset(sx(ex + fx * wr * 0.12f), sy(ey + fy * wr * 0.12f)))
         }
@@ -850,7 +877,7 @@ class Game {
         if (!dead) list.add("You" to (player.mass * 10).toInt())
         for (b in bots) list.add(b.name to (b.mass * 10).toInt())
         list.sortByDescending { it.second }
-        var y = 40f * d
+        var y = 80f * d
         label("Leaderboard", viewW - 24f * d, y, 15f * d, Paint.Align.RIGHT, bold = true)
         for (i in 0 until min(6, list.size)) {
             y += 24f * d
