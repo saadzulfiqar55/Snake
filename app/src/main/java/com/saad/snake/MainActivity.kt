@@ -11,6 +11,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -33,7 +41,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -94,8 +101,23 @@ class MainActivity : ComponentActivity() {
 // ---------------------------------------------------------------------------
 @Composable
 fun SnakeGame() {
+    val ctx = LocalContext.current
+    val store = remember { SettingsStore(ctx) }
+    val sfx = remember { Sfx(ctx) }
     val game = remember { Game() }
     var frame by remember { mutableStateOf(0L) }
+    var showSettings by remember { mutableStateOf(false) }
+    var showAbout by remember { mutableStateOf(false) }
+    var speed by remember { mutableStateOf(store.speed) }
+    var volume by remember { mutableStateOf(store.volume) }
+
+    // push the current settings into the game (cheap, runs only when state changes)
+    game.speedMul = speed
+    game.paused = showSettings || showAbout
+    game.onEat = { sfx.eat() }
+    game.onDeath = { sfx.die() }
+    sfx.volume = volume
+    DisposableEffect(Unit) { onDispose { sfx.release() } }
 
     LaunchedEffect(Unit) {
         var last = 0L
@@ -110,61 +132,104 @@ fun SnakeGame() {
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
-        Canvas(Modifier.fillMaxSize()) {
-            game.render(this, frame)
+    MaterialTheme(colorScheme = darkColorScheme()) {
+        Box(Modifier.fillMaxSize()) {
+            Canvas(Modifier.fillMaxSize()) {
+                game.render(this, frame)
+            }
+
+            // LEFT HALF: floating joystick (appears wherever you touch)
+            Box(
+                Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxHeight()
+                    .fillMaxWidth(0.5f)
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown()
+                            if (game.dead && game.deadTime > 0.8f) game.restart()
+                            game.joyActive = true
+                            game.joyBase = down.position
+                            game.joyKnob = down.position
+                            var pressed = true
+                            while (pressed) {
+                                val ev = awaitPointerEvent()
+                                val c = ev.changes.firstOrNull { it.id == down.id }
+                                if (c == null || !c.pressed) {
+                                    pressed = false
+                                } else {
+                                    game.joyKnob = c.position
+                                    c.consume()
+                                }
+                            }
+                            game.joyActive = false
+                        }
+                    }
+            )
+
+            // RIGHT HALF: hold anywhere to boost
+            Box(
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .fillMaxWidth(0.5f)
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown()
+                            if (game.dead && game.deadTime > 0.8f) game.restart()
+                            game.boosting = true
+                            var pressed = true
+                            while (pressed) {
+                                val ev = awaitPointerEvent()
+                                val c = ev.changes.firstOrNull { it.id == down.id }
+                                if (c == null || !c.pressed) pressed = false else c.consume()
+                            }
+                            game.boosting = false
+                        }
+                    }
+            )
+
+            // SETTINGS BUTTON (top centre, sits above the touch zones)
+            Button(
+                onClick = {
+                    game.joyActive = false
+                    game.boosting = false
+                    showSettings = true
+                },
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 8.dp)
+            ) { Text("Settings") }
         }
 
-        // LEFT HALF: floating joystick (appears wherever you touch)
-        Box(
-            Modifier
-                .align(Alignment.CenterStart)
-                .fillMaxHeight()
-                .fillMaxWidth(0.5f)
-                .pointerInput(Unit) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown()
-                        if (game.dead && game.deadTime > 0.8f) game.restart()
-                        game.joyActive = true
-                        game.joyBase = down.position
-                        game.joyKnob = down.position
-                        var pressed = true
-                        while (pressed) {
-                            val ev = awaitPointerEvent()
-                            val c = ev.changes.firstOrNull { it.id == down.id }
-                            if (c == null || !c.pressed) {
-                                pressed = false
-                            } else {
-                                game.joyKnob = c.position
-                                c.consume()
-                            }
-                        }
-                        game.joyActive = false
-                    }
-                }
-        )
-
-        // RIGHT HALF: hold anywhere to boost
-        Box(
-            Modifier
-                .align(Alignment.CenterEnd)
-                .fillMaxHeight()
-                .fillMaxWidth(0.5f)
-                .pointerInput(Unit) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown()
-                        if (game.dead && game.deadTime > 0.8f) game.restart()
-                        game.boosting = true
-                        var pressed = true
-                        while (pressed) {
-                            val ev = awaitPointerEvent()
-                            val c = ev.changes.firstOrNull { it.id == down.id }
-                            if (c == null || !c.pressed) pressed = false else c.consume()
-                        }
-                        game.boosting = false
-                    }
-                }
-        )
+        if (showSettings) {
+            SettingsDialog(
+                speed = speed,
+                onSpeedChange = { speed = it },
+                volume = volume,
+                onVolumeChange = { volume = it },
+                onSave = {
+                    store.speed = speed
+                    store.volume = volume
+                    sfx.eat() // little preview blip so you can hear the volume
+                },
+                onRestart = {
+                    game.restart()
+                    showSettings = false
+                },
+                onAbout = {
+                    showSettings = false
+                    showAbout = true
+                },
+                onClose = { showSettings = false }
+            )
+        }
+        if (showAbout) {
+            AboutDialog(onClose = {
+                showAbout = false
+                showSettings = true
+            })
+        }
     }
 }
 
@@ -218,6 +283,12 @@ class Game {
     var joyBase = Offset.Zero
     var joyKnob = Offset.Zero
     var boosting = false
+
+    // settings + hooks (set from the UI)
+    var speedMul = 1f
+    var paused = false
+    var onEat: (() -> Unit)? = null
+    var onDeath: (() -> Unit)? = null
 
     // state
     lateinit var player: Snake
@@ -301,7 +372,7 @@ class Game {
             val e = it.next()
             val mx = ((e.key shr 32).toInt() + 0.5f) * CHUNK
             val my = (e.key.toInt() + 0.5f) * CHUNK
-            if (abs(mx - camX) > limX || abs(my - camY) > limY) it.remove()
+            if (kotlin.math.abs(mx - camX) > limX || kotlin.math.abs(my - camY) > limY) it.remove()
         }
     }
 
@@ -309,7 +380,7 @@ class Game {
 
     // ---------------------------------------------------------------- update
     fun update(dt: Float) {
-        if (dt.isNaN() || dt <= 0f) return
+        if (dt.isNaN() || dt <= 0f || paused) return
         time += dt
 
         if (!dead) {
@@ -352,6 +423,7 @@ class Game {
         if (playerDied) {
             explode(player)
             dead = true
+            onDeath?.invoke()
             deadTime = 0f
             best = max(best, (player.mass * 10).toInt())
         }
@@ -390,10 +462,10 @@ class Game {
             var diff = target - s.angle
             while (diff > PIF) diff -= TAU
             while (diff < -PIF) diff += TAU
-            val maxTurn = turnRate(s) * turnMul * dt
+            val maxTurn = turnRate(s) * turnMul * dt * speedMul
             s.angle += diff.coerceIn(-maxTurn, maxTurn)
         }
-        val speed = if (s.boosting) BOOST_SPEED else BASE_SPEED
+        val speed = (if (s.boosting) BOOST_SPEED else BASE_SPEED) * speedMul
         val h = s.segs[0]
         h.x += cos(s.angle) * speed * dt
         h.y += sin(s.angle) * speed * dt
@@ -452,6 +524,7 @@ class Game {
                     val er = eatR + f.size
                     if (d2 < er * er) {
                         s.mass += f.size * 0.16f
+                        if (s === player) onEat?.invoke()
                         list[i] = list[list.size - 1]
                         list.removeAt(list.size - 1)
                     } else if (d2 < magR * magR) {
