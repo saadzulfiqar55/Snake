@@ -1,9 +1,10 @@
-package com.saad.snake // <-- KEEP YOUR OWN package line from your project
+package com.saad.snake
 
 import android.graphics.Paint
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -106,6 +107,7 @@ fun SnakeGame() {
     val sfx = remember { Sfx(ctx) }
     val game = remember { Game() }
     var frame by remember { mutableStateOf(0L) }
+    var screen by remember { mutableStateOf(Screen.HOME) }
     var showSettings by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var speed by remember { mutableStateOf(store.speed) }
@@ -113,11 +115,18 @@ fun SnakeGame() {
 
     // push the current settings into the game (cheap, runs only when state changes)
     game.speedMul = speed
-    game.paused = showSettings || showAbout
+    game.paused = screen == Screen.HOME || showSettings || showAbout
     game.onEat = { sfx.eat() }
     game.onDeath = { sfx.die() }
     sfx.volume = volume
     DisposableEffect(Unit) { onDispose { sfx.release() } }
+
+    // Back button while playing opens the pause/settings window instead of quitting
+    BackHandler(enabled = screen == Screen.PLAYING && !showSettings && !showAbout) {
+        game.joyActive = false
+        game.boosting = false
+        showSettings = true
+    }
 
     LaunchedEffect(Unit) {
         var last = 0L
@@ -133,73 +142,85 @@ fun SnakeGame() {
     }
 
     MaterialTheme(colorScheme = darkColorScheme()) {
-        Box(Modifier.fillMaxSize()) {
-            Canvas(Modifier.fillMaxSize()) {
-                game.render(this, frame)
-            }
-
-            // LEFT HALF: floating joystick (appears wherever you touch)
-            Box(
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .fillMaxHeight()
-                    .fillMaxWidth(0.5f)
-                    .pointerInput(Unit) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown()
-                            if (game.dead && game.deadTime > 0.8f) game.restart()
-                            game.joyActive = true
-                            game.joyBase = down.position
-                            game.joyKnob = down.position
-                            var pressed = true
-                            while (pressed) {
-                                val ev = awaitPointerEvent()
-                                val c = ev.changes.firstOrNull { it.id == down.id }
-                                if (c == null || !c.pressed) {
-                                    pressed = false
-                                } else {
-                                    game.joyKnob = c.position
-                                    c.consume()
-                                }
-                            }
-                            game.joyActive = false
-                        }
-                    }
-            )
-
-            // RIGHT HALF: hold anywhere to boost
-            Box(
-                Modifier
-                    .align(Alignment.CenterEnd)
-                    .fillMaxHeight()
-                    .fillMaxWidth(0.5f)
-                    .pointerInput(Unit) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown()
-                            if (game.dead && game.deadTime > 0.8f) game.restart()
-                            game.boosting = true
-                            var pressed = true
-                            while (pressed) {
-                                val ev = awaitPointerEvent()
-                                val c = ev.changes.firstOrNull { it.id == down.id }
-                                if (c == null || !c.pressed) pressed = false else c.consume()
-                            }
-                            game.boosting = false
-                        }
-                    }
-            )
-
-            // SETTINGS BUTTON (top centre, sits above the touch zones)
-            Button(
-                onClick = {
+        if (screen == Screen.HOME) {
+            HomeScreen(
+                onStart = {
                     game.joyActive = false
                     game.boosting = false
-                    showSettings = true
+                    game.restart()
+                    screen = Screen.PLAYING
                 },
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 8.dp)
-            ) { Text("Settings") }
+                onSettings = { showSettings = true }
+            )
+        } else {
+            Box(Modifier.fillMaxSize()) {
+                Canvas(Modifier.fillMaxSize()) {
+                    game.render(this, frame)
+                }
+
+                // LEFT HALF: floating joystick (appears wherever you touch)
+                Box(
+                    Modifier
+                        .align(Alignment.CenterStart)
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.5f)
+                        .pointerInput(Unit) {
+                            awaitEachGesture {
+                                val down = awaitFirstDown()
+                                if (game.dead && game.deadTime > 0.8f) game.restart()
+                                game.joyActive = true
+                                game.joyBase = down.position
+                                game.joyKnob = down.position
+                                var pressed = true
+                                while (pressed) {
+                                    val ev = awaitPointerEvent()
+                                    val c = ev.changes.firstOrNull { it.id == down.id }
+                                    if (c == null || !c.pressed) {
+                                        pressed = false
+                                    } else {
+                                        game.joyKnob = c.position
+                                        c.consume()
+                                    }
+                                }
+                                game.joyActive = false
+                            }
+                        }
+                )
+
+                // RIGHT HALF: hold anywhere to boost
+                Box(
+                    Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.5f)
+                        .pointerInput(Unit) {
+                            awaitEachGesture {
+                                val down = awaitFirstDown()
+                                if (game.dead && game.deadTime > 0.8f) game.restart()
+                                game.boosting = true
+                                var pressed = true
+                                while (pressed) {
+                                    val ev = awaitPointerEvent()
+                                    val c = ev.changes.firstOrNull { it.id == down.id }
+                                    if (c == null || !c.pressed) pressed = false else c.consume()
+                                }
+                                game.boosting = false
+                            }
+                        }
+                )
+
+                // SETTINGS BUTTON (top centre, sits above the touch zones)
+                Button(
+                    onClick = {
+                        game.joyActive = false
+                        game.boosting = false
+                        showSettings = true
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 8.dp)
+                ) { Text("Settings") }
+            }
         }
 
         if (showSettings) {
@@ -213,9 +234,16 @@ fun SnakeGame() {
                     store.volume = volume
                     sfx.eat() // little preview blip so you can hear the volume
                 },
+                inGame = screen == Screen.PLAYING,
                 onRestart = {
                     game.restart()
                     showSettings = false
+                },
+                onHome = {
+                    game.joyActive = false
+                    game.boosting = false
+                    showSettings = false
+                    screen = Screen.HOME
                 },
                 onAbout = {
                     showSettings = false

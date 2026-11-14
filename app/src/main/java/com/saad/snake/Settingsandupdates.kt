@@ -5,6 +5,16 @@ import android.content.Intent
 import android.media.AudioAttributes
 import android.media.SoundPool
 import android.net.Uri
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.os.Build
+import android.provider.Settings
+import androidx.core.content.FileProvider
+import androidx.compose.material3.LinearProgressIndicator
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -240,7 +250,7 @@ fun openUrl(ctx: Context, url: String) {
 }
 
 // ---------------------------------------------------------------------------
-// Settings dialog
+// Settings dialog (used from the home screen and from inside the game)
 // ---------------------------------------------------------------------------
 @Composable
 fun SettingsDialog(
@@ -249,7 +259,9 @@ fun SettingsDialog(
     volume: Float,
     onVolumeChange: (Float) -> Unit,
     onSave: () -> Unit,
+    inGame: Boolean,
     onRestart: () -> Unit,
+    onHome: () -> Unit,
     onAbout: () -> Unit,
     onClose: () -> Unit
 ) {
@@ -281,19 +293,159 @@ fun SettingsDialog(
                 )
 
                 Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onRestart, modifier = Modifier.weight(1f)) { Text("Restart") }
-                    OutlinedButton(onClick = onAbout, modifier = Modifier.weight(1f)) { Text("About") }
+                if (inGame) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onRestart, modifier = Modifier.weight(1f)) { Text("Restart") }
+                        OutlinedButton(onClick = onHome, modifier = Modifier.weight(1f)) { Text("Main menu") }
+                    }
+                    Spacer(Modifier.height(8.dp))
                 }
+                OutlinedButton(onClick = onAbout, modifier = Modifier.fillMaxWidth()) { Text("About") }
                 Spacer(Modifier.height(8.dp))
-                Button(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("Resume") }
+                Button(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (inGame) "Resume" else "Close")
+                }
             }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// About dialog: version + update check (like Morphe Manager's About/update flow)
+// In-app APK download + install
+// ---------------------------------------------------------------------------
+sealed class DownloadState {
+    object None : DownloadState()
+    object NeedPermission : DownloadState()
+    data class Downloading(val done: Long, val total: Long) : DownloadState()
+    data class Ready(val file: File) : DownloadState()
+    data class Failed(val message: String) : DownloadState()
+}
+
+/** Downloads the APK into the app's private cache, reporting progress. Cancel by cancelling the coroutine. */
+suspend fun downloadApk(ctx: Context, url: String, onProgress: (Long, Long) -> Unit): File =
+    withContext(Dispatchers.IO) {
+        val dir = File(ctx.cacheDir, "updates")
+        dir.mkdirs()
+        dir.listFiles()?.forEach { it.delete() }   // remove older downloads
+        val out = File(dir, "update.apk")
+        val tmp = File(dir, "update.apk.part")
+        var conn: HttpURLConnection? = null
+        try {
+            conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            conn.instanceFollowRedirects = true      // GitHub redirects to its file servers
+            conn.setRequestProperty("User-Agent", "SnakeArena-Updater")
+            val code = conn.responseCode
+            if (code != 200) throw IOException("Server returned $code")
+            val total = conn.contentLengthLong        // -1 if the server doesn't say
+            conn.inputStream.use { input ->
+                tmp.outputStream().use { output ->
+                    val buf = ByteArray(16 * 1024)
+                    var done = 0L
+                    var lastReport = 0L
+                    while (true) {
+                        ensureActive()
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        output.write(buf, 0, n)
+                        done += n
+                        val now = System.currentTimeMillis()
+                        if (now - lastReport > 100) {
+                            lastReport = now
+                            onProgress(done, total)
+                        }
+                    }
+                    onProgress(done, total)
+                    if (total > 0 && done != total) throw IOException("Download incomplete")
+                }
+            }
+            if (!tmp.renameTo(out)) throw IOException("Couldn't save the file")
+            out
+        } catch (e: Exception) {
+            tmp.delete()
+            throw e
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+/**
+ * Returns an error message if the file is not a valid APK for THIS app
+ * (same package name AND same signing key), otherwise null.
+ */
+@Suppress("DEPRECATION")
+fun validateApk(ctx: Context, file: File): String? {
+    val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES
+    else PackageManager.GET_SIGNATURES
+    val pm = ctx.packageManager
+    val archive = try {
+        pm.getPackageArchiveInfo(file.absolutePath, flags)
+    } catch (e: Exception) {
+        null
+    }
+    if (archive == null) return "The downloaded file isn't a valid APK."
+    if (archive.packageName != ctx.packageName) return "The downloaded APK belongs to a different app."
+
+    val installed = try {
+        pm.getPackageInfo(ctx.packageName, flags)
+    } catch (e: Exception) {
+        null
+    }
+    val newKeys = signerKeys(archive)
+    val oldKeys = signerKeys(installed)
+    if (newKeys.isNotEmpty() && oldKeys.isNotEmpty() && newKeys.intersect(oldKeys).isEmpty()) {
+        return "This update is signed with a different key than the installed app, so Android would " +
+                "refuse it. Uninstall the game once, install the release APK from GitHub, and future " +
+                "updates will work."
+    }
+    return null
+}
+
+@Suppress("DEPRECATION")
+private fun signerKeys(info: PackageInfo?): Set<String> {
+    if (info == null) return emptySet()
+    val sigs = if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures
+    return sigs?.map { it.toCharsString() }?.toSet() ?: emptySet()
+}
+
+fun canInstallApks(ctx: Context): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.O || ctx.packageManager.canRequestPackageInstalls()
+
+fun openInstallPermissionSettings(ctx: Context) {
+    try {
+        ctx.startActivity(
+            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${ctx.packageName}"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    } catch (e: Exception) {
+        // settings screen unavailable - ignore
+    }
+}
+
+/** Opens Android's installer for the downloaded APK. Returns false if the install permission is missing. */
+fun tryInstall(ctx: Context, file: File): Boolean {
+    if (!canInstallApks(ctx)) {
+        openInstallPermissionSettings(ctx)
+        return false
+    }
+    return try {
+        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        ctx.startActivity(intent)
+        true
+    } catch (e: Exception) {
+        false
+    }
+}
+
+private fun mb(bytes: Long): String = "%.1f".format(bytes / 1048576f)
+
+// ---------------------------------------------------------------------------
+// About dialog: version, update check, in-app download + install
 // ---------------------------------------------------------------------------
 @Composable
 fun AboutDialog(onClose: () -> Unit) {
@@ -302,11 +454,44 @@ fun AboutDialog(onClose: () -> Unit) {
     val version = remember { appVersion(ctx) }
     val name = remember { appName(ctx) }
     var state by remember { mutableStateOf<UpdateState>(UpdateState.Idle) }
+    var dl by remember { mutableStateOf<DownloadState>(DownloadState.None) }
+    var job by remember { mutableStateOf<Job?>(null) }
 
     // check automatically when the About window opens
     LaunchedEffect(Unit) {
         state = UpdateState.Checking
         state = checkForUpdate(version)
+    }
+
+    fun startDownload(url: String) {
+        // Ask for the "install unknown apps" permission BEFORE downloading
+        if (!canInstallApks(ctx)) {
+            dl = DownloadState.NeedPermission
+            openInstallPermissionSettings(ctx)
+            return
+        }
+        job?.cancel()
+        dl = DownloadState.Downloading(0L, -1L)
+        job = scope.launch {
+            try {
+                val file = downloadApk(ctx, url) { done, total ->
+                    dl = DownloadState.Downloading(done, total)
+                }
+                val err = validateApk(ctx, file)
+                if (err != null) {
+                    file.delete()
+                    dl = DownloadState.Failed(err)
+                } else {
+                    dl = DownloadState.Ready(file)
+                    tryInstall(ctx, file)
+                }
+            } catch (e: CancellationException) {
+                dl = DownloadState.None
+                throw e
+            } catch (e: Exception) {
+                dl = DownloadState.Failed("Download failed: ${e.message ?: "unknown error"}")
+            }
+        }
     }
 
     Dialog(onDismissRequest = onClose) {
@@ -329,25 +514,73 @@ fun AboutDialog(onClose: () -> Unit) {
                     }
                     UpdateState.UpToDate -> Text("You're on the latest version.")
                     is UpdateState.Available -> {
-                        Text(
-                            "Update available: ${s.info.version}",
-                            fontWeight = FontWeight.Bold
-                        )
+                        val apk = s.info.apkUrl
+                        Text("Update available: ${s.info.version}", fontWeight = FontWeight.Bold)
                         if (s.info.notes.isNotBlank()) {
                             Spacer(Modifier.height(8.dp))
                             Text(
                                 s.info.notes.trim(),
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier
-                                    .heightIn(max = 140.dp)
+                                    .heightIn(max = 120.dp)
                                     .verticalScroll(rememberScrollState())
                             )
                         }
-                        Spacer(Modifier.height(8.dp))
-                        Button(
-                            onClick = { openUrl(ctx, s.info.apkUrl ?: s.info.pageUrl) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text("Download update") }
+                        Spacer(Modifier.height(10.dp))
+
+                        when (val d = dl) {
+                            DownloadState.None, DownloadState.NeedPermission, is DownloadState.Failed -> {
+                                if (d == DownloadState.NeedPermission) {
+                                    Text(
+                                        "Android needs your permission to install updates from this app. " +
+                                                "Turn on Allow from this source, then come back and tap Download again.",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                }
+                                if (d is DownloadState.Failed) {
+                                    Text(d.message, color = MaterialTheme.colorScheme.error)
+                                    Spacer(Modifier.height(8.dp))
+                                }
+                                if (apk != null) {
+                                    Button(
+                                        onClick = { startDownload(apk) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) { Text(if (d is DownloadState.Failed) "Retry download" else "Download and install") }
+                                } else {
+                                    Text("This release has no APK file attached.")
+                                    OutlinedButton(
+                                        onClick = { openUrl(ctx, s.info.pageUrl) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) { Text("Open release page") }
+                                }
+                            }
+                            is DownloadState.Downloading -> {
+                                if (d.total > 0) {
+                                    val frac = (d.done.toFloat() / d.total).coerceIn(0f, 1f)
+                                    LinearProgressIndicator(progress = { frac }, modifier = Modifier.fillMaxWidth())
+                                    Spacer(Modifier.height(6.dp))
+                                    Text("Downloading... ${(frac * 100).toInt()}%  (${mb(d.done)} / ${mb(d.total)} MB)")
+                                } else {
+                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                    Spacer(Modifier.height(6.dp))
+                                    Text("Downloading... ${mb(d.done)} MB")
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                OutlinedButton(
+                                    onClick = { job?.cancel(); dl = DownloadState.None },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) { Text("Cancel") }
+                            }
+                            is DownloadState.Ready -> {
+                                Text("Download complete. Tap Install if the installer didn't open.")
+                                Spacer(Modifier.height(8.dp))
+                                Button(
+                                    onClick = { tryInstall(ctx, d.file) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) { Text("Install update") }
+                            }
+                        }
                     }
                     is UpdateState.Error -> Text(s.message, color = MaterialTheme.colorScheme.error)
                 }
@@ -360,7 +593,7 @@ fun AboutDialog(onClose: () -> Unit) {
                             state = checkForUpdate(version)
                         }
                     },
-                    enabled = state !is UpdateState.Checking,
+                    enabled = state !is UpdateState.Checking && dl !is DownloadState.Downloading,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Check for updates") }
 
