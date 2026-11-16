@@ -38,13 +38,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.random.Random
 
-enum class Screen { HOME, PLAYING }
+enum class Screen { AUTH, HOME, PLAYING }
 
 // ---------------------------------------------------------------------------
 // Home screen: title + START + SETTINGS in the middle
 // ---------------------------------------------------------------------------
 @Composable
-fun HomeScreen(onStart: () -> Unit, onSettings: () -> Unit) {
+fun HomeScreen(
+    onStart: () -> Unit,
+    onSettings: () -> Unit,
+    highScore: Int,
+    userEmail: String?,
+    onSignOut: () -> Unit
+) {
     val ctx = LocalContext.current
     val name = remember { appName(ctx) }
     val version = remember { appVersion(ctx) }
@@ -53,20 +59,60 @@ fun HomeScreen(onStart: () -> Unit, onSettings: () -> Unit) {
         HomeBackground()
 
         // Dark overlay so the buttons stay readable on any background image.
-        // Make it lighter/darker by changing alpha (0f = none, 1f = black).
         Box(
             Modifier
                 .fillMaxSize()
                 .background(Color.Black.copy(alpha = 0.25f))
         )
 
+        // ── High score badge (top-left) ──────────────────────────────────
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "🏆 Best: $highScore",
+                color = Color(0xFFFFD54F),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+            if (userEmail != null) {
+                Text(
+                    text = userEmail,
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 11.sp
+                )
+            } else {
+                Text(
+                    text = "Playing as guest",
+                    color = Color.White.copy(alpha = 0.5f),
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        // ── Sign-out button (top-right) ──────────────────────────────────
+        androidx.compose.material3.TextButton(
+            onClick = onSignOut,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+        ) {
+            Text(
+                text = if (userEmail != null) "Sign Out" else "Log In",
+                color = Color.White.copy(alpha = 0.75f),
+                fontSize = 13.sp
+            )
+        }
+
+        // ── Centre buttons ───────────────────────────────────────────────
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
                 .width(280.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Delete this Text if your background image already contains a title.
             Text(
                 text = name.uppercase(),
                 color = Color.White,

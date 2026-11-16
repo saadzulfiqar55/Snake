@@ -26,7 +26,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -115,18 +117,37 @@ fun SnakeGame() {
     val store = remember { SettingsStore(ctx) }
     val sfx = remember { Sfx(ctx) }
     val game = remember { Game() }
+    val scores = remember { ScoreRepository(ctx) }
     var frame by remember { mutableLongStateOf(0L) }
-    var screen by remember { mutableStateOf(Screen.HOME) }
+    var screen by remember { mutableStateOf(if (scores.isLoggedIn()) Screen.HOME else Screen.AUTH) }
     var showSettings by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var speed by remember { androidx.compose.runtime.mutableFloatStateOf(store.speed) }
     var volume by remember { androidx.compose.runtime.mutableFloatStateOf(store.volume) }
+    var highScore by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+
+    // Load high score whenever we arrive at the home screen
+    LaunchedEffect(screen) {
+        if (screen == Screen.HOME) {
+            highScore = scores.getHighScore()
+        }
+    }
 
     // push the current settings into the game (cheap, runs only when state changes)
     game.speedMul = speed
-    game.paused = screen == Screen.HOME || showSettings || showAbout
+    game.paused = screen != Screen.PLAYING || showSettings || showAbout
     game.onEat = { sfx.eat() }
-    game.onDeath = { sfx.die() }
+    game.onDeath = {
+        sfx.die()
+        // Submit score on death; update the displayed high score immediately
+        val finalScore = (game.player.mass * 10).toInt()
+        scope.launch {
+            scores.submitScore(finalScore)
+            val updated = scores.getHighScore()
+            highScore = updated
+        }
+    }
     sfx.volume = volume
     DisposableEffect(Unit) { onDispose { sfx.release() } }
 
@@ -151,102 +172,104 @@ fun SnakeGame() {
     }
 
     MaterialTheme(colorScheme = darkColorScheme()) {
-        if (screen == Screen.HOME) {
-            HomeScreen(
-                onStart = {
-                    game.joyActive = false
-                    game.boosting = false
-                    game.restart()
-                    screen = Screen.PLAYING
-                },
-                onSettings = { showSettings = true }
-            )
-        } else {
-            Box(Modifier.fillMaxSize()) {
-                Canvas(Modifier.fillMaxSize()) {
-                    game.render(this, frame)
-                }
-
-                // LEFT HALF: floating joystick (appears wherever you touch)
-                Box(
-                    Modifier
-                        .align(Alignment.CenterStart)
-                        .fillMaxHeight()
-                        .fillMaxWidth(0.5f)
-                        .pointerInput(Unit) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown()
-                                if (game.dead && game.deadTime > 0.8f) game.restart()
-                                game.joyActive = true
-                                game.joyBase = down.position
-                                game.joyKnob = down.position
-                                var pressed = true
-                                while (pressed) {
-                                    val ev = awaitPointerEvent()
-                                    val c = ev.changes.firstOrNull { it.id == down.id }
-                                    if (c == null || !c.pressed) {
-                                        pressed = false
-                                    } else {
-                                        game.joyKnob = c.position
-                                        c.consume()
-                                    }
-                                }
-                                game.joyActive = false
-                            }
-                        }
-                )
-
-                // RIGHT HALF: hold anywhere to boost
-                Box(
-                    Modifier
-                        .align(Alignment.CenterEnd)
-                        .fillMaxHeight()
-                        .fillMaxWidth(0.5f)
-                        .pointerInput(Unit) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown()
-                                if (game.dead && game.deadTime > 0.8f) game.restart()
-                                game.boosting = true
-                                var pressed = true
-                                while (pressed) {
-                                    val ev = awaitPointerEvent()
-                                    val c = ev.changes.firstOrNull { it.id == down.id }
-                                    if (c == null || !c.pressed) pressed = false else c.consume()
-                                }
-                                game.boosting = false
-                            }
-                        }
-                )
-
-//                // SETTINGS BUTTON (top centre, sits above the touch zones)
-//                Button(
-//                    onClick = {
-//                        game.joyActive = false
-//                        game.boosting = false
-//                        showSettings = true
-//                    },
-//                    modifier = Modifier
-//                        .align(Alignment.TopEnd)
-//                        .padding(top = 8.dp)
-//                ) { Text("Settings") }
-
-                // SETTINGS BUTTON
-                IconButton(
-                    onClick = {
+        when (screen) {
+            Screen.AUTH -> {
+                AuthScreen(onAuthDone = {
+                    screen = Screen.HOME
+                })
+            }
+            Screen.HOME -> {
+                HomeScreen(
+                    onStart = {
                         game.joyActive = false
                         game.boosting = false
-                        showSettings = true
+                        game.restart()
+                        screen = Screen.PLAYING
                     },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 8.dp, end = 8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = "Settings",
-                        tint = Color.White, // Use a high-contrast color so it stands out over your arena
-                        modifier = Modifier.size(32.dp) // Optional: adjust icon size for easier thumb tapping
+                    onSettings = { showSettings = true },
+                    highScore = highScore,
+                    userEmail = scores.currentUserEmail(),
+                    onSignOut = {
+                        scores.signOut()
+                        screen = Screen.AUTH
+                    }
+                )
+            }
+            Screen.PLAYING -> {
+                Box(Modifier.fillMaxSize()) {
+                    Canvas(Modifier.fillMaxSize()) {
+                        game.render(this, frame)
+                    }
+
+                    // LEFT HALF: floating joystick (appears wherever you touch)
+                    Box(
+                        Modifier
+                            .align(Alignment.CenterStart)
+                            .fillMaxHeight()
+                            .fillMaxWidth(0.5f)
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown()
+                                    if (game.dead && game.deadTime > 0.8f) game.restart()
+                                    game.joyActive = true
+                                    game.joyBase = down.position
+                                    game.joyKnob = down.position
+                                    var pressed = true
+                                    while (pressed) {
+                                        val ev = awaitPointerEvent()
+                                        val c = ev.changes.firstOrNull { it.id == down.id }
+                                        if (c == null || !c.pressed) {
+                                            pressed = false
+                                        } else {
+                                            game.joyKnob = c.position
+                                            c.consume()
+                                        }
+                                    }
+                                    game.joyActive = false
+                                }
+                            }
                     )
+
+                    // RIGHT HALF: hold anywhere to boost
+                    Box(
+                        Modifier
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight()
+                            .fillMaxWidth(0.5f)
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown()
+                                    if (game.dead && game.deadTime > 0.8f) game.restart()
+                                    game.boosting = true
+                                    var pressed = true
+                                    while (pressed) {
+                                        val ev = awaitPointerEvent()
+                                        val c = ev.changes.firstOrNull { it.id == down.id }
+                                        if (c == null || !c.pressed) pressed = false else c.consume()
+                                    }
+                                    game.boosting = false
+                                }
+                            }
+                    )
+
+                    // SETTINGS BUTTON
+                    IconButton(
+                        onClick = {
+                            game.joyActive = false
+                            game.boosting = false
+                            showSettings = true
+                        },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 8.dp, end = 8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Settings",
+                            tint = Color.White,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
                 }
             }
         }
@@ -260,7 +283,7 @@ fun SnakeGame() {
                 onSave = {
                     store.speed = speed
                     store.volume = volume
-                    sfx.eat() // little preview blip so you can hear the volume
+                    sfx.eat()
                 },
                 inGame = screen == Screen.PLAYING,
                 onRestart = {
